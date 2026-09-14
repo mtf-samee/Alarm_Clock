@@ -6,13 +6,13 @@ import uuid
 import datetime
 import shutil
 import subprocess
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QLabel, QPushButton, QDialog, 
-                             QListWidget, QListWidgetItem, QLineEdit, 
-                             QFileDialog, QMessageBox, QCheckBox, QComboBox,
-                             QTimeEdit, QSpinBox)
-from PyQt6.QtCore import Qt, QTimer, QTime, QUrl
-from PyQt6.QtGui import QFont, QShortcut, QKeySequence
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QLabel, QPushButton, QDialog,
+                             QListWidget, QListWidgetItem, QLineEdit,
+                             QMessageBox, QCheckBox, QComboBox, QFileDialog,
+                             QSpinBox, QSystemTrayIcon, QMenu, QSlider, QStyle, QGroupBox)
+from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, QEvent
+from PyQt6.QtGui import QFont, QIcon, QAction
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 CONFIG_DIR = os.path.expanduser("~/.config/alarm_clock")
@@ -35,7 +35,7 @@ def calculate_next_trigger(alarm):
         if not days:
             if candidate <= now: candidate += datetime.timedelta(days=1)
             return candidate.isoformat()
-        
+
         for i in range(8):
             test_date = candidate + datetime.timedelta(days=i)
             if test_date.weekday() in days and test_date > now:
@@ -47,13 +47,15 @@ def calculate_next_trigger(alarm):
             test_date = candidate + datetime.timedelta(days=i)
             if test_date.day == target_day and test_date > now:
                 return test_date.isoformat()
-                
+
     return candidate.isoformat()
 
 class ConfigManager:
     def __init__(self):
         self.config = {
             "sound_dir": os.path.expanduser("~/Music"),
+            "use_common_sound": False,
+            "common_sound_file": "",
             "alarms": []
         }
         self.load()
@@ -63,7 +65,7 @@ class ConfigManager:
         if not os.path.exists(CONFIG_FILE):
             self.save()
             return
-        
+
         try:
             with open(CONFIG_FILE, 'r') as f:
                 self.config.update(json.load(f))
@@ -85,17 +87,42 @@ class AudioManager:
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
         self.player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(1.0)
+        self.fade_timer = QTimer()
+        self.fade_timer.timeout.connect(self._fade_step)
+        self.target_volume = 1.0
+        self.current_volume = 0.0
 
-    def play(self, sound_file):
+    def play(self, sound_file, volume=1.0, fade_in=False):
         if not sound_file: return
-        path = os.path.join(self.config.config["sound_dir"], sound_file)
+        path = sound_file if os.path.isabs(sound_file) else os.path.join(self.config.config["sound_dir"], sound_file)
         if not os.path.exists(path): return
+
         self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.play()
+
+        if fade_in:
+            self.target_volume = volume
+            self.current_volume = 0.0
+            self.audio_output.setVolume(self.current_volume)
+            self.player.play()
+            self.fade_timer.start(100)
+        else:
+            self.audio_output.setVolume(volume)
+            self.player.play()
+
+    def _fade_step(self):
+        self.current_volume += self.target_volume / 20.0
+        if self.current_volume >= self.target_volume:
+            self.current_volume = self.target_volume
+            self.fade_timer.stop()
+        self.audio_output.setVolume(self.current_volume)
 
     def stop(self):
+        self.fade_timer.stop()
         self.player.stop()
+
+    def pause(self):
+        self.fade_timer.stop()
+        self.player.pause()
 
 class NotificationManager:
     @staticmethod
@@ -112,17 +139,32 @@ class AlarmDialog(QDialog):
         self.audio = audio
         self.alarm = alarm
         self.setWindowTitle("Edit Alarm" if alarm else "New Alarm")
+        self.audio.player.playbackStateChanged.connect(self.on_playback_state_changed)
         self.setup_ui()
         if self.alarm:
             self.populate()
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        
-        self.time_edit = QTimeEdit()
-        self.time_edit.setDisplayFormat("HH:mm")
-        self.time_edit.setFont(QFont("Monospace", 24))
-        layout.addWidget(self.time_edit)
+
+        time_layout = QHBoxLayout()
+        self.hr_combo = QComboBox()
+        self.hr_combo.addItems([f"{i:02d}" for i in range(24)])
+        self.hr_combo.setFont(QFont("Monospace", 24))
+
+        self.min_combo = QComboBox()
+        self.min_combo.addItems([f"{i:02d}" for i in range(60)])
+        self.min_combo.setFont(QFont("Monospace", 24))
+
+        colon_lbl = QLabel(":")
+        colon_lbl.setFont(QFont("Monospace", 24, QFont.Weight.Bold))
+
+        time_layout.addStretch()
+        time_layout.addWidget(self.hr_combo)
+        time_layout.addWidget(colon_lbl)
+        time_layout.addWidget(self.min_combo)
+        time_layout.addStretch()
+        layout.addLayout(time_layout)
 
         self.label_edit = QLineEdit()
         self.label_edit.setPlaceholderText("Alarm Label (e.g., Wake up)")
@@ -150,18 +192,33 @@ class AlarmDialog(QDialog):
         month_layout.addWidget(self.day_spin)
         layout.addWidget(self.monthly_widget)
 
+        vol_layout = QHBoxLayout()
+        vol_layout.addWidget(QLabel("Volume:"))
+        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setValue(100)
+        vol_layout.addWidget(self.vol_slider)
+        layout.addLayout(vol_layout)
+
         snd_layout = QHBoxLayout()
         self.sound_edit = QLineEdit()
-        self.sound_edit.setPlaceholderText("sound.wav")
-        btn_test = QPushButton("Test")
-        btn_test.clicked.connect(lambda: self.audio.play(self.sound_edit.text()))
+        self.sound_edit.setPlaceholderText("sound.wav or Absolute Path")
+
+        btn_browse = QPushButton("Browse")
+        btn_browse.clicked.connect(self.browse_sound)
+
+        self.btn_test = QPushButton("Test")
+        self.btn_test.clicked.connect(self.toggle_test_sound)
+
         snd_layout.addWidget(self.sound_edit)
-        snd_layout.addWidget(btn_test)
-        layout.addWidget(QLabel("Sound file (in sound dir):"))
+        snd_layout.addWidget(btn_browse)
+        snd_layout.addWidget(self.btn_test)
+
+        layout.addWidget(QLabel("Individual Sound File:"))
         layout.addLayout(snd_layout)
 
         snz_layout = QHBoxLayout()
-        snz_layout.addWidget(QLabel("Snooze (minutes):"))
+        snz_layout.addWidget(QLabel("Default Snooze (minutes):"))
         self.snooze_spin = QSpinBox()
         self.snooze_spin.setRange(1, 60)
         self.snooze_spin.setValue(5)
@@ -179,28 +236,55 @@ class AlarmDialog(QDialog):
 
         self.toggle_repeat_widgets("none")
 
+        now = datetime.datetime.now()
+        self.hr_combo.setCurrentText(f"{now.hour:02d}")
+        self.min_combo.setCurrentText(f"{now.minute:02d}")
+
+    def browse_sound(self):
+        file, _ = QFileDialog.getOpenFileName(self, "Select Audio File", self.config.config["sound_dir"], "Audio Files (*.wav *.mp3 *.ogg *.flac)")
+        if file:
+            self.sound_edit.setText(file)
+
+    def toggle_test_sound(self):
+        if self.audio.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.audio.stop()
+        else:
+            vol = self.vol_slider.value() / 100.0
+            snd = self.sound_edit.text()
+            if not snd and self.config.config["use_common_sound"]:
+                snd = self.config.config["common_sound_file"]
+            self.audio.play(snd, vol, fade_in=False)
+
+    def on_playback_state_changed(self, state):
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.btn_test.setText("Stop")
+        else:
+            self.btn_test.setText("Test")
+
     def toggle_repeat_widgets(self, mode):
         self.weekly_widget.setVisible(mode == "weekly")
         self.monthly_widget.setVisible(mode == "monthly")
 
     def populate(self):
-        h, m = map(int, self.alarm['time'].split(':'))
-        self.time_edit.setTime(QTime(h, m))
+        h, m = self.alarm['time'].split(':')
+        self.hr_combo.setCurrentText(h)
+        self.min_combo.setCurrentText(m)
         self.label_edit.setText(self.alarm['label'])
         self.repeat_combo.setCurrentText(self.alarm['repeat_type'])
-        
+
         if self.alarm['repeat_type'] == 'weekly':
             for i, chk in enumerate(self.day_checks):
                 chk.setChecked(i in self.alarm['repeat_days'])
         elif self.alarm['repeat_type'] == 'monthly':
             self.day_spin.setValue(self.alarm.get('repeat_date', 1))
-            
+
         self.sound_edit.setText(self.alarm['sound'])
+        self.vol_slider.setValue(int(self.alarm.get('volume', 1.0) * 100))
         self.snooze_spin.setValue(self.alarm.get('snooze_duration', 5))
 
     def save(self):
-        time_str = self.time_edit.time().toString("HH:mm")
-        
+        time_str = f"{self.hr_combo.currentText()}:{self.min_combo.currentText()}"
+
         days = []
         if self.repeat_combo.currentText() == "weekly":
             days = [i for i, chk in enumerate(self.day_checks) if chk.isChecked()]
@@ -214,23 +298,39 @@ class AlarmDialog(QDialog):
             "repeat_days": days,
             "repeat_date": self.day_spin.value(),
             "sound": self.sound_edit.text(),
+            "volume": self.vol_slider.value() / 100.0,
             "snooze_duration": self.snooze_spin.value()
         }
         new_alarm['next_trigger'] = calculate_next_trigger(new_alarm)
-        
+
         self.alarm = new_alarm
         self.accept()
 
+    def closeEvent(self, event):
+        self.audio.stop()
+        try:
+            self.audio.player.playbackStateChanged.disconnect(self.on_playback_state_changed)
+        except TypeError:
+            pass
+        super().closeEvent(event)
+
 class RingDialog(QDialog):
-    def __init__(self, alarm, audio, parent=None):
+    def __init__(self, alarm, audio, config, parent=None):
         super().__init__(parent)
         self.alarm = alarm
         self.audio = audio
+        self.config = config
         self.snoozed = False
-        self.setWindowTitle("ALARM")
+        self.snooze_duration = self.alarm.get('snooze_duration', 5)
+        self.setWindowTitle("ALARM RINGING")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
         self.setup_ui()
-        self.audio.play(self.alarm['sound'])
+
+        snd = self.alarm['sound']
+        if not snd or self.config.config["use_common_sound"]:
+            snd = self.config.config["common_sound_file"]
+
+        self.audio.play(snd, self.alarm.get('volume', 1.0), fade_in=True)
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -244,37 +344,82 @@ class RingDialog(QDialog):
         lbl_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl_label)
 
-        btn_stop = QPushButton("STOP")
+        btn_stop = QPushButton("STOP (Enter)")
         btn_stop.setFont(QFont("Sans", 16, QFont.Weight.Bold))
+        btn_stop.setStyleSheet("background-color: #a00; color: white;")
         btn_stop.clicked.connect(self.stop)
-        
-        btn_snooze = QPushButton(f"Snooze ({self.alarm.get('snooze_duration', 5)}m)")
-        btn_snooze.setFont(QFont("Sans", 16))
-        btn_snooze.clicked.connect(self.snooze)
-
         layout.addWidget(btn_stop)
-        layout.addWidget(btn_snooze)
+
+        snz_layout = QHBoxLayout()
+        self.snooze_spin = QSpinBox()
+        self.snooze_spin.setRange(1, 120)
+        self.snooze_spin.setValue(self.snooze_duration)
+        self.snooze_spin.setFont(QFont("Sans", 14))
+        self.snooze_spin.valueChanged.connect(self.on_snooze_edit)
+
+        self.btn_snooze = QPushButton("Snooze (Space)")
+        self.btn_snooze.setFont(QFont("Sans", 16))
+        self.btn_snooze.clicked.connect(self.snooze)
+
+        snz_layout.addWidget(QLabel("Snooze for (min):"))
+        snz_layout.addWidget(self.snooze_spin)
+        snz_layout.addWidget(self.btn_snooze)
+        layout.addLayout(snz_layout)
+
+    def keyPressEvent(self, event):
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QSpinBox, QComboBox)):
+            super().keyPressEvent(event)
+            return
+
+        if event.key() == Qt.Key.Key_Space:
+            if isinstance(fw, QPushButton):
+                super().keyPressEvent(event)
+            else:
+                self.snooze()
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.stop()
+        else:
+            super().keyPressEvent(event)
+
+    def on_snooze_edit(self):
+        self.audio.pause()
+        self.snooze_duration = self.snooze_spin.value()
+        self.btn_snooze.setText(f"Snooze ({self.snooze_duration}m)")
 
     def stop(self):
         self.audio.stop()
         self.accept()
 
     def snooze(self):
+        self.snooze_duration = self.snooze_spin.value()
         self.audio.stop()
         self.snoozed = True
         self.accept()
+
+    def closeEvent(self, event):
+        self.audio.stop()
+        super().closeEvent(event)
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
         self.audio = AudioManager(self.config_manager)
-        
+
         self.setWindowTitle("Alarm Clock")
-        self.resize(500, 400)
-        
+
+        icon = QIcon.fromTheme("appointment-soon")
+        if icon.isNull(): icon = QIcon.fromTheme("alarm")
+        self.setWindowIcon(icon)
+
+        self.resize(550, 600)
+
         self.setup_ui()
+        self.setup_tray()
         self.refresh_list()
+
+        QApplication.instance().installEventFilter(self)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check_alarms)
@@ -285,11 +430,16 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
+        self.lbl_countdown = QLabel("No active alarms")
+        self.lbl_countdown.setFont(QFont("Sans", 14, QFont.Weight.Bold))
+        self.lbl_countdown.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_countdown)
+
         self.list_widget = QListWidget()
         layout.addWidget(self.list_widget)
 
         btn_layout = QHBoxLayout()
-        btn_add = QPushButton("Add Alarm")
+        btn_add = QPushButton("Add Alarm (N)")
         btn_add.clicked.connect(self.add_alarm)
         btn_edit = QPushButton("Edit Selected")
         btn_edit.clicked.connect(self.edit_alarm)
@@ -301,36 +451,124 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(btn_del)
         layout.addLayout(btn_layout)
 
+        global_group = QGroupBox("Global Settings")
+        g_layout = QVBoxLayout(global_group)
+
         dir_layout = QHBoxLayout()
         self.edit_sound_dir = QLineEdit(self.config_manager.config["sound_dir"])
-        btn_dir_save = QPushButton("Save Sound Dir")
-        btn_dir_save.clicked.connect(self.save_sound_dir)
-        dir_layout.addWidget(QLabel("Sound Directory:"))
+        btn_dir_browse = QPushButton("Browse Dir")
+        btn_dir_browse.clicked.connect(self.browse_dir)
+        dir_layout.addWidget(QLabel("Base Sound Dir:"))
         dir_layout.addWidget(self.edit_sound_dir)
-        dir_layout.addWidget(btn_dir_save)
-        layout.addLayout(dir_layout)
+        dir_layout.addWidget(btn_dir_browse)
+        g_layout.addLayout(dir_layout)
+
+        com_layout = QHBoxLayout()
+        self.chk_common = QCheckBox("Use Common Default Sound")
+        self.chk_common.setChecked(self.config_manager.config["use_common_sound"])
+        self.edit_common = QLineEdit(self.config_manager.config["common_sound_file"])
+        btn_com_browse = QPushButton("Browse File")
+        btn_com_browse.clicked.connect(self.browse_common_file)
+        com_layout.addWidget(self.chk_common)
+        com_layout.addWidget(self.edit_common)
+        com_layout.addWidget(btn_com_browse)
+        g_layout.addLayout(com_layout)
+
+        btn_save_globals = QPushButton("Save Global Settings")
+        btn_save_globals.clicked.connect(self.save_globals)
+        g_layout.addWidget(btn_save_globals)
+
+        layout.addWidget(global_group)
+
+        btn_tray = QPushButton("Run in Background / Minimize (M)")
+        btn_tray.clicked.connect(self.hide)
+        layout.addWidget(btn_tray)
+
+    def setup_tray(self):
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+        self.tray_icon = QSystemTrayIcon(self)
+        self.tray_icon.setIcon(self.windowIcon())
+
+        tray_menu = QMenu()
+        restore_action = QAction("Show / Hide", self)
+        restore_action.triggered.connect(self.toggle_window)
+        quit_action = QAction("Quit Application (Q)", self)
+        quit_action.triggered.connect(QApplication.instance().quit)
+
+        tray_menu.addAction(restore_action)
+        tray_menu.addSeparator()
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.tray_activated)
+        self.tray_icon.show()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            fw = QApplication.focusWidget()
+            if isinstance(fw, (QLineEdit, QSpinBox, QComboBox)):
+                return super().eventFilter(obj, event)
+
+            key = event.key()
+            if key == Qt.Key.Key_N:
+                if isinstance(fw, QPushButton):
+                    return super().eventFilter(obj, event)
+                self.add_alarm()
+                return True
+            elif key == Qt.Key.Key_M:
+                self.hide()
+                return True
+            elif key == Qt.Key.Key_Q:
+                QApplication.instance().quit()
+                return True
+        return super().eventFilter(obj, event)
+
+    def tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self.toggle_window()
+
+    def toggle_window(self):
+        if self.isHidden():
+            self.showNormal()
+            self.activateWindow()
+        else:
+            self.hide()
 
     def refresh_list(self):
         self.list_widget.clear()
-        for i, alarm in enumerate(self.config_manager.config["alarms"]):
+        sorted_alarms = sorted(
+            enumerate(self.config_manager.config["alarms"]),
+            key=lambda x: x[1].get('next_trigger', '9999-12-31') if x[1]['active'] else '9999-12-31'
+        )
+
+        for orig_idx, alarm in sorted_alarms:
             item = QListWidgetItem()
             widget = QWidget()
             h_layout = QHBoxLayout(widget)
             h_layout.setContentsMargins(5, 5, 5, 5)
-            
+
             chk_active = QCheckBox()
             chk_active.setChecked(alarm['active'])
-            chk_active.toggled.connect(lambda state, idx=i: self.toggle_active(idx, state))
-            
-            lbl_info = QLabel(f"{alarm['time']} - {alarm['label']} ({alarm['repeat_type']})")
-            
+            chk_active.toggled.connect(lambda state, idx=orig_idx: self.toggle_active(idx, state))
+
+            bold_font = QFont()
+            bold_font.setBold(True)
+            lbl_time = QLabel(alarm['time'])
+            lbl_time.setFont(bold_font)
+
+            lbl_info = QLabel(f" - {alarm['label']} ({alarm['repeat_type']})")
+
             h_layout.addWidget(chk_active)
+            h_layout.addWidget(lbl_time)
             h_layout.addWidget(lbl_info)
             h_layout.addStretch()
-            
+
             item.setSizeHint(widget.sizeHint())
+            item.setData(Qt.ItemDataRole.UserRole, orig_idx)
             self.list_widget.addItem(item)
             self.list_widget.setItemWidget(item, widget)
+
+        self.update_countdown()
 
     def toggle_active(self, index, state):
         alarm = self.config_manager.config["alarms"][index]
@@ -338,6 +576,12 @@ class MainWindow(QMainWindow):
         if state:
             alarm['next_trigger'] = calculate_next_trigger(alarm)
         self.config_manager.save()
+        self.refresh_list()
+
+    def get_selected_original_index(self):
+        item = self.list_widget.currentItem()
+        if not item: return -1
+        return item.data(Qt.ItemDataRole.UserRole)
 
     def add_alarm(self):
         dlg = AlarmDialog(self.config_manager, self.audio, parent=self)
@@ -347,7 +591,7 @@ class MainWindow(QMainWindow):
             self.refresh_list()
 
     def edit_alarm(self):
-        idx = self.list_widget.currentRow()
+        idx = self.get_selected_original_index()
         if idx < 0: return
         alarm = self.config_manager.config["alarms"][idx]
         dlg = AlarmDialog(self.config_manager, self.audio, alarm, parent=self)
@@ -357,36 +601,74 @@ class MainWindow(QMainWindow):
             self.refresh_list()
 
     def delete_alarm(self):
-        idx = self.list_widget.currentRow()
+        idx = self.get_selected_original_index()
         if idx < 0: return
         del self.config_manager.config["alarms"][idx]
         self.config_manager.save()
         self.refresh_list()
 
-    def save_sound_dir(self):
+    def browse_dir(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Base Sound Directory", self.edit_sound_dir.text())
+        if dir_path:
+            self.edit_sound_dir.setText(dir_path)
+
+    def browse_common_file(self):
+        file, _ = QFileDialog.getOpenFileName(self, "Select Common Audio File", self.edit_sound_dir.text(), "Audio Files (*.wav *.mp3 *.ogg *.flac)")
+        if file:
+            self.edit_common.setText(file)
+
+    def save_globals(self):
         self.config_manager.config["sound_dir"] = self.edit_sound_dir.text()
+        self.config_manager.config["use_common_sound"] = self.chk_common.isChecked()
+        self.config_manager.config["common_sound_file"] = self.edit_common.text()
         self.config_manager.save()
+        QMessageBox.information(self, "Settings Saved", "Global settings updated successfully.")
+
+    def update_countdown(self):
+        active_alarms = [a for a in self.config_manager.config["alarms"] if a['active']]
+        if not active_alarms:
+            self.lbl_countdown.setText("No active alarms")
+            self.tray_icon.setToolTip("Alarm Clock - No active alarms")
+        else:
+            now = datetime.datetime.now()
+            next_alarm = min(active_alarms, key=lambda a: a['next_trigger'])
+            trigger_dt = datetime.datetime.fromisoformat(next_alarm['next_trigger'])
+            diff = trigger_dt - now
+
+            if diff.total_seconds() > 0:
+                hours, rem = divmod(diff.seconds, 3600)
+                minutes, seconds = divmod(rem, 60)
+                days = diff.days
+
+                time_str = f"{days}d " if days > 0 else ""
+                time_str += f"{hours:02d}h {minutes:02d}m {seconds:02d}s"
+                self.lbl_countdown.setText(f"Next alarm in: {time_str}")
+                self.tray_icon.setToolTip(f"Next alarm in: {time_str}")
+            else:
+                self.lbl_countdown.setText("Alarm ringing soon...")
+                self.tray_icon.setToolTip("Alarm ringing soon...")
 
     def check_alarms(self):
+        self.update_countdown()
         now = datetime.datetime.now().isoformat()
-        
+
         for alarm in self.config_manager.config["alarms"]:
             if alarm['active'] and alarm.get('next_trigger', '') <= now:
-                NotificationManager.send("ALARM", alarm['label'])
-                
-                ring_dlg = RingDialog(alarm, self.audio, self)
+                if self.isHidden():
+                    NotificationManager.send("ALARM", alarm['label'])
+
+                ring_dlg = RingDialog(alarm, self.audio, self.config_manager, self)
                 ring_dlg.exec()
-                
+
                 if ring_dlg.snoozed:
-                    # Calculate snooze target
-                    snooze_dt = datetime.datetime.now() + datetime.timedelta(minutes=alarm.get('snooze_duration', 5))
+                    snooze_dt = datetime.datetime.now() + datetime.timedelta(minutes=ring_dlg.snooze_duration)
                     alarm['next_trigger'] = snooze_dt.isoformat()
                 else:
                     if alarm['repeat_type'] == 'none':
                         alarm['active'] = False
                     else:
                         alarm['next_trigger'] = calculate_next_trigger(alarm)
-                        
+
                 self.config_manager.save()
                 self.refresh_list()
 
