@@ -342,6 +342,7 @@ class RingDialog(QDialog):
             snd = self.config.config["common_sound_file"]
 
         self.audio.play(snd, self.alarm.get('volume', 1.0), fade_in=True)
+        self.setFocus()
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -366,7 +367,7 @@ class RingDialog(QDialog):
 
         self.snooze_combo = QComboBox()
         self.snooze_combo.setEditable(True)
-        self.snooze_combo.addItems([str(i) for i in range(1, 31)])
+        self.snooze_combo.addItems([str(i) for i in range(1, 121)])
         self.snooze_combo.setCurrentText(str(self.snooze_duration))
         self.snooze_combo.setFont(QFont("Sans", 14))
         self.snooze_combo.currentTextChanged.connect(self.on_snooze_edit)
@@ -381,6 +382,7 @@ class RingDialog(QDialog):
         snz_layout.addWidget(self.btn_snooze)
         layout.addLayout(snz_layout)
 
+        # Universal Event Filter ensures Space/Enter/Arrows work everywhere in the dialog
         self.installEventFilter(self)
         self.snooze_combo.installEventFilter(self)
         self.snooze_combo.lineEdit().installEventFilter(self)
@@ -395,20 +397,26 @@ class RingDialog(QDialog):
                 self.stop()
                 return True
             elif key == Qt.Key.Key_Up:
-                try:
-                    val = int(self.snooze_combo.currentText())
-                    self.snooze_combo.setCurrentText(str(min(val + 1, 120)))
-                except ValueError:
-                    pass
+                self.snooze_up()
                 return True
             elif key == Qt.Key.Key_Down:
-                try:
-                    val = int(self.snooze_combo.currentText())
-                    self.snooze_combo.setCurrentText(str(max(val - 1, 1)))
-                except ValueError:
-                    pass
+                self.snooze_down()
                 return True
         return super().eventFilter(obj, event)
+
+    def snooze_up(self):
+        try:
+            val = int(self.snooze_combo.currentText())
+            self.snooze_combo.setCurrentText(str(min(val + 1, 120)))
+        except ValueError:
+            pass
+
+    def snooze_down(self):
+        try:
+            val = int(self.snooze_combo.currentText())
+            self.snooze_combo.setCurrentText(str(max(val - 1, 1)))
+        except ValueError:
+            pass
 
     def on_snooze_edit(self, text):
         self.audio.pause()
