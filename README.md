@@ -1,13 +1,27 @@
 # Alarm Clock
 
-A multi-functional desktop alarm application built with PyQt6. Designed for Wayland on Fedora Linux.
+A multi-functional desktop alarm application built with PyQt6. Designed for Wayland on Fedora Linux and compatible with other Linux distributions.
 
 ## Requirements
 
-You need `python3-pyqt6` for the application logic and `libnotify` for native Wayland desktop notifications.
-
+### Fedora Linux
 ```bash
 sudo dnf install python3-pyqt6 libnotify -y
+```
+
+### Ubuntu / Debian / Linux Mint
+```bash
+sudo apt install python3-pyqt6 libnotify-bin qt6-wayland -y
+```
+
+### Arch Linux
+```bash
+sudo pacman -S python-pyqt6 libnotify qt6-wayland
+```
+
+### openSUSE
+```bash
+sudo zypper install python3-PyQt6 libnotify-tools libQt6WaylandClient5 -y
 ```
 
 ## Usage
