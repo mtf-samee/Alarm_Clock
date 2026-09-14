@@ -324,8 +324,10 @@ class RingDialog(QDialog):
         self.config = config
         self.snoozed = False
         self.snooze_duration = self.alarm.get('snooze_duration', 5)
+
         self.setWindowTitle("ALARM RINGING")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setup_ui()
 
         snd = self.alarm['sound']
@@ -333,6 +335,7 @@ class RingDialog(QDialog):
             snd = self.config.config["common_sound_file"]
 
         self.audio.play(snd, self.alarm.get('volume', 1.0), fade_in=True)
+        self.setFocus() # Ensure dialog has focus, not the text field
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -358,6 +361,7 @@ class RingDialog(QDialog):
         self.snooze_spin.setRange(1, 120)
         self.snooze_spin.setValue(self.snooze_duration)
         self.snooze_spin.setFont(QFont("Sans", 14))
+        self.snooze_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus) # Prevent auto-focus
         self.snooze_spin.valueChanged.connect(self.on_snooze_edit)
 
         self.btn_snooze = QPushButton("Snooze (Space)")
@@ -695,7 +699,6 @@ if __name__ == "__main__":
         with open(pid_file, 'w') as f:
             f.write(str(os.getpid()))
     except IOError:
-        # App is already running, send SIGUSR1 to toggle window
         try:
             with open(pid_file, 'r') as f:
                 pid = int(f.read().strip())
@@ -709,12 +712,10 @@ if __name__ == "__main__":
     app.setDesktopFileName("alarm-clock.desktop")
     window = MainWindow()
 
-    # Handle the incoming toggle signal
     def handle_toggle(signum, frame):
         QTimer.singleShot(0, window.toggle_window)
     signal.signal(signal.SIGUSR1, handle_toggle)
 
-    # Fast dummy timer to ensure python signals are processed instantly by the Qt Event Loop
     wakeup_timer = QTimer()
     wakeup_timer.timeout.connect(lambda: None)
     wakeup_timer.start(100)
