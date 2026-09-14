@@ -6,13 +6,14 @@ import uuid
 import datetime
 import shutil
 import subprocess
+import fcntl
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QDialog,
                              QListWidget, QListWidgetItem, QLineEdit,
                              QMessageBox, QCheckBox, QComboBox, QFileDialog,
                              QSpinBox, QSystemTrayIcon, QMenu, QSlider, QStyle, QGroupBox)
-from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, QEvent
-from PyQt6.QtGui import QFont, QIcon, QAction
+from PyQt6.QtCore import Qt, QTimer, QTime, QUrl
+from PyQt6.QtGui import QFont, QIcon, QAction, QShortcut, QKeySequence
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 CONFIG_DIR = os.path.expanduser("~/.config/alarm_clock")
@@ -347,6 +348,7 @@ class RingDialog(QDialog):
         btn_stop = QPushButton("STOP (Enter)")
         btn_stop.setFont(QFont("Sans", 16, QFont.Weight.Bold))
         btn_stop.setStyleSheet("background-color: #a00; color: white;")
+        btn_stop.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_stop.clicked.connect(self.stop)
         layout.addWidget(btn_stop)
 
@@ -359,6 +361,7 @@ class RingDialog(QDialog):
 
         self.btn_snooze = QPushButton("Snooze (Space)")
         self.btn_snooze.setFont(QFont("Sans", 16))
+        self.btn_snooze.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_snooze.clicked.connect(self.snooze)
 
         snz_layout.addWidget(QLabel("Snooze for (min):"))
@@ -373,10 +376,7 @@ class RingDialog(QDialog):
             return
 
         if event.key() == Qt.Key.Key_Space:
-            if isinstance(fw, QPushButton):
-                super().keyPressEvent(event)
-            else:
-                self.snooze()
+            self.snooze()
         elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.stop()
         else:
@@ -406,24 +406,26 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config_manager = ConfigManager()
         self.audio = AudioManager(self.config_manager)
-
         self.setWindowTitle("Alarm Clock")
 
-        icon = QIcon.fromTheme("appointment-soon")
-        if icon.isNull(): icon = QIcon.fromTheme("alarm")
-        self.setWindowIcon(icon)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        local_icon = os.path.join(script_dir, "alarm_clock.png")
+        if os.path.exists(local_icon):
+            app_icon = QIcon(local_icon)
+            self.setWindowIcon(app_icon)
+            QApplication.instance().setWindowIcon(app_icon)
 
         self.resize(550, 600)
-
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setup_ui()
         self.setup_tray()
         self.refresh_list()
 
-        QApplication.instance().installEventFilter(self)
-
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.check_alarms)
         self.timer.start(1000)
+
+        self.setFocus()
 
     def setup_ui(self):
         central = QWidget()
@@ -436,14 +438,20 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.lbl_countdown)
 
         self.list_widget = QListWidget()
+        self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout.addWidget(self.list_widget)
 
         btn_layout = QHBoxLayout()
         btn_add = QPushButton("Add Alarm (N)")
+        btn_add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_add.clicked.connect(self.add_alarm)
+
         btn_edit = QPushButton("Edit Selected")
+        btn_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_edit.clicked.connect(self.edit_alarm)
+
         btn_del = QPushButton("Delete Selected")
+        btn_del.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_del.clicked.connect(self.delete_alarm)
 
         btn_layout.addWidget(btn_add)
@@ -457,6 +465,7 @@ class MainWindow(QMainWindow):
         dir_layout = QHBoxLayout()
         self.edit_sound_dir = QLineEdit(self.config_manager.config["sound_dir"])
         btn_dir_browse = QPushButton("Browse Dir")
+        btn_dir_browse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_dir_browse.clicked.connect(self.browse_dir)
         dir_layout.addWidget(QLabel("Base Sound Dir:"))
         dir_layout.addWidget(self.edit_sound_dir)
@@ -465,9 +474,11 @@ class MainWindow(QMainWindow):
 
         com_layout = QHBoxLayout()
         self.chk_common = QCheckBox("Use Common Default Sound")
+        self.chk_common.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.chk_common.setChecked(self.config_manager.config["use_common_sound"])
         self.edit_common = QLineEdit(self.config_manager.config["common_sound_file"])
         btn_com_browse = QPushButton("Browse File")
+        btn_com_browse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_com_browse.clicked.connect(self.browse_common_file)
         com_layout.addWidget(self.chk_common)
         com_layout.addWidget(self.edit_common)
@@ -475,12 +486,14 @@ class MainWindow(QMainWindow):
         g_layout.addLayout(com_layout)
 
         btn_save_globals = QPushButton("Save Global Settings")
+        btn_save_globals.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_save_globals.clicked.connect(self.save_globals)
         g_layout.addWidget(btn_save_globals)
 
         layout.addWidget(global_group)
 
         btn_tray = QPushButton("Run in Background / Minimize (M)")
+        btn_tray.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_tray.clicked.connect(self.hide)
         layout.addWidget(btn_tray)
 
@@ -503,25 +516,21 @@ class MainWindow(QMainWindow):
         self.tray_icon.activated.connect(self.tray_activated)
         self.tray_icon.show()
 
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress:
-            fw = QApplication.focusWidget()
-            if isinstance(fw, (QLineEdit, QSpinBox, QComboBox)):
-                return super().eventFilter(obj, event)
+    def keyPressEvent(self, event):
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QSpinBox, QComboBox)):
+            super().keyPressEvent(event)
+            return
 
-            key = event.key()
-            if key == Qt.Key.Key_N:
-                if isinstance(fw, QPushButton):
-                    return super().eventFilter(obj, event)
-                self.add_alarm()
-                return True
-            elif key == Qt.Key.Key_M:
-                self.hide()
-                return True
-            elif key == Qt.Key.Key_Q:
-                QApplication.instance().quit()
-                return True
-        return super().eventFilter(obj, event)
+        key = event.key()
+        if key == Qt.Key.Key_N:
+            QTimer.singleShot(0, self.add_alarm)
+        elif key == Qt.Key.Key_M:
+            self.hide()
+        elif key == Qt.Key.Key_Q:
+            QApplication.instance().quit()
+        else:
+            super().keyPressEvent(event)
 
     def tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -548,6 +557,7 @@ class MainWindow(QMainWindow):
             h_layout.setContentsMargins(5, 5, 5, 5)
 
             chk_active = QCheckBox()
+            chk_active.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             chk_active.setChecked(alarm['active'])
             chk_active.toggled.connect(lambda state, idx=orig_idx: self.toggle_active(idx, state))
 
@@ -623,6 +633,7 @@ class MainWindow(QMainWindow):
         self.config_manager.config["common_sound_file"] = self.edit_common.text()
         self.config_manager.save()
         QMessageBox.information(self, "Settings Saved", "Global settings updated successfully.")
+        self.setFocus()
 
     def update_countdown(self):
         active_alarms = [a for a in self.config_manager.config["alarms"] if a['active']]
@@ -673,8 +684,18 @@ class MainWindow(QMainWindow):
                 self.refresh_list()
 
 if __name__ == "__main__":
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    lock_file = os.path.join(CONFIG_DIR, "alarm_clock.lock")
+    lock_fp = open(lock_file, 'w')
+    try:
+        fcntl.lockf(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print("Alarm Clock is already running.")
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     app.setApplicationName("Alarm Clock")
+    app.setDesktopFileName("alarm-clock.desktop")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
