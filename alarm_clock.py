@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QListWidget, QListWidgetItem, QLineEdit,
                              QMessageBox, QCheckBox, QComboBox, QFileDialog,
                              QSpinBox, QSystemTrayIcon, QMenu, QSlider, QStyle, QGroupBox)
-from PyQt6.QtCore import Qt, QTimer, QTime, QUrl
+from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, QEvent
 from PyQt6.QtGui import QFont, QIcon, QAction, QShortcut, QKeySequence
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -242,6 +242,14 @@ class AlarmDialog(QDialog):
         self.hr_combo.setCurrentText(f"{now.hour:02d}")
         self.min_combo.setCurrentText(f"{now.minute:02d}")
 
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.save()
+        elif event.key() == Qt.Key.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
+
     def browse_sound(self):
         file, _ = QFileDialog.getOpenFileName(self, "Select Audio File", self.config.config["sound_dir"], "Audio Files (*.wav *.mp3 *.ogg *.flac)")
         if file:
@@ -327,7 +335,6 @@ class RingDialog(QDialog):
 
         self.setWindowTitle("ALARM RINGING")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setup_ui()
 
         snd = self.alarm['sound']
@@ -335,7 +342,6 @@ class RingDialog(QDialog):
             snd = self.config.config["common_sound_file"]
 
         self.audio.play(snd, self.alarm.get('volume', 1.0), fade_in=True)
-        self.setFocus() # Ensure dialog has focus, not the text field
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -357,12 +363,13 @@ class RingDialog(QDialog):
         layout.addWidget(btn_stop)
 
         snz_layout = QHBoxLayout()
-        self.snooze_spin = QSpinBox()
-        self.snooze_spin.setRange(1, 120)
-        self.snooze_spin.setValue(self.snooze_duration)
-        self.snooze_spin.setFont(QFont("Sans", 14))
-        self.snooze_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus) # Prevent auto-focus
-        self.snooze_spin.valueChanged.connect(self.on_snooze_edit)
+
+        self.snooze_combo = QComboBox()
+        self.snooze_combo.setEditable(True)
+        self.snooze_combo.addItems([str(i) for i in range(1, 31)])
+        self.snooze_combo.setCurrentText(str(self.snooze_duration))
+        self.snooze_combo.setFont(QFont("Sans", 14))
+        self.snooze_combo.currentTextChanged.connect(self.on_snooze_edit)
 
         self.btn_snooze = QPushButton("Snooze (Space)")
         self.btn_snooze.setFont(QFont("Sans", 16))
@@ -370,34 +377,56 @@ class RingDialog(QDialog):
         self.btn_snooze.clicked.connect(self.snooze)
 
         snz_layout.addWidget(QLabel("Snooze for (min):"))
-        snz_layout.addWidget(self.snooze_spin)
+        snz_layout.addWidget(self.snooze_combo)
         snz_layout.addWidget(self.btn_snooze)
         layout.addLayout(snz_layout)
 
-    def keyPressEvent(self, event):
-        fw = QApplication.focusWidget()
-        if isinstance(fw, (QLineEdit, QSpinBox, QComboBox)):
-            super().keyPressEvent(event)
-            return
+        self.installEventFilter(self)
+        self.snooze_combo.installEventFilter(self)
+        self.snooze_combo.lineEdit().installEventFilter(self)
 
-        if event.key() == Qt.Key.Key_Space:
-            self.snooze()
-        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.stop()
-        else:
-            super().keyPressEvent(event)
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_Space:
+                self.snooze()
+                return True
+            elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.stop()
+                return True
+            elif key == Qt.Key.Key_Up:
+                try:
+                    val = int(self.snooze_combo.currentText())
+                    self.snooze_combo.setCurrentText(str(min(val + 1, 120)))
+                except ValueError:
+                    pass
+                return True
+            elif key == Qt.Key.Key_Down:
+                try:
+                    val = int(self.snooze_combo.currentText())
+                    self.snooze_combo.setCurrentText(str(max(val - 1, 1)))
+                except ValueError:
+                    pass
+                return True
+        return super().eventFilter(obj, event)
 
-    def on_snooze_edit(self):
+    def on_snooze_edit(self, text):
         self.audio.pause()
-        self.snooze_duration = self.snooze_spin.value()
-        self.btn_snooze.setText(f"Snooze ({self.snooze_duration}m)")
+        try:
+            self.snooze_duration = int(text)
+            self.btn_snooze.setText(f"Snooze ({self.snooze_duration}m)")
+        except ValueError:
+            pass
 
     def stop(self):
         self.audio.stop()
         self.accept()
 
     def snooze(self):
-        self.snooze_duration = self.snooze_spin.value()
+        try:
+            self.snooze_duration = int(self.snooze_combo.currentText())
+        except ValueError:
+            self.snooze_duration = 5
         self.audio.stop()
         self.snoozed = True
         self.accept()
