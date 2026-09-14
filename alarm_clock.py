@@ -7,6 +7,7 @@ import datetime
 import shutil
 import subprocess
 import fcntl
+import signal
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QPushButton, QDialog,
                              QListWidget, QListWidgetItem, QLineEdit,
@@ -686,16 +687,37 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     os.makedirs(CONFIG_DIR, exist_ok=True)
     lock_file = os.path.join(CONFIG_DIR, "alarm_clock.lock")
+    pid_file = os.path.join(CONFIG_DIR, "alarm_clock.pid")
+
     lock_fp = open(lock_file, 'w')
     try:
         fcntl.lockf(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with open(pid_file, 'w') as f:
+            f.write(str(os.getpid()))
     except IOError:
-        print("Alarm Clock is already running.")
+        # App is already running, send SIGUSR1 to toggle window
+        try:
+            with open(pid_file, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, signal.SIGUSR1)
+        except Exception:
+            pass
         sys.exit(0)
 
     app = QApplication(sys.argv)
     app.setApplicationName("Alarm Clock")
     app.setDesktopFileName("alarm-clock.desktop")
     window = MainWindow()
+
+    # Handle the incoming toggle signal
+    def handle_toggle(signum, frame):
+        QTimer.singleShot(0, window.toggle_window)
+    signal.signal(signal.SIGUSR1, handle_toggle)
+
+    # Fast dummy timer to ensure python signals are processed instantly by the Qt Event Loop
+    wakeup_timer = QTimer()
+    wakeup_timer.timeout.connect(lambda: None)
+    wakeup_timer.start(100)
+
     window.show()
     sys.exit(app.exec())
