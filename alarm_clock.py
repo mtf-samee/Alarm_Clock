@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QCheckBox, QComboBox, QFileDialog,
                              QSpinBox, QSystemTrayIcon, QMenu, QSlider, QStyle, QGroupBox)
 from PyQt6.QtCore import Qt, QTimer, QTime, QUrl, QEvent
-from PyQt6.QtGui import QFont, QIcon, QAction, QShortcut, QKeySequence
+from PyQt6.QtGui import QFont, QIcon, QAction, QShortcut, QKeySequence, QColor, QIntValidator
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 CONFIG_DIR = os.path.expanduser("~/.config/alarm_clock")
@@ -58,6 +58,13 @@ class ConfigManager:
             "sound_dir": os.path.expanduser("~/Music"),
             "use_common_sound": False,
             "common_sound_file": "",
+            "bedside_settings": {
+                "font_family": "Monospace",
+                "font_color": "#00ffff",
+                "font_size": 80,
+                "show_seconds": True,
+                "show_countdown": True
+            },
             "alarms": []
         }
         self.load()
@@ -70,7 +77,16 @@ class ConfigManager:
 
         try:
             with open(CONFIG_FILE, 'r') as f:
-                self.config.update(json.load(f))
+                data = json.load(f)
+                self.config.update(data)
+                if "bedside_settings" not in self.config:
+                    self.config["bedside_settings"] = {
+                        "font_family": "Monospace",
+                        "font_color": "#00ffff",
+                        "font_size": 80,
+                        "show_seconds": True,
+                        "show_countdown": True
+                    }
         except Exception:
             if os.path.exists(BACKUP_FILE):
                 with open(BACKUP_FILE, 'r') as f:
@@ -100,6 +116,7 @@ class AudioManager:
         if not os.path.exists(path): return
 
         self.player.setSource(QUrl.fromLocalFile(path))
+        self.player.setLoops(QMediaPlayer.Loops.Infinite)
 
         if fade_in:
             self.target_volume = volume
@@ -128,9 +145,10 @@ class AudioManager:
 
 class NotificationManager:
     @staticmethod
-    def send(title, message):
+    def send_missed(start_time, end_time):
         try:
-            subprocess.Popen(['notify-send', '-a', 'Alarm Clock', '-u', 'critical', title, message])
+            msg = f"Alarm set for {start_time} ended at {end_time}"
+            subprocess.Popen(['notify-send', '-a', 'Alarm Clock', '-u', 'critical', '-t', '10000', 'MISSED ALARM', msg])
         except FileNotFoundError:
             pass
 
@@ -227,6 +245,28 @@ class AlarmDialog(QDialog):
         snz_layout.addWidget(self.snooze_spin)
         layout.addLayout(snz_layout)
 
+        ring_dur_layout = QHBoxLayout()
+        ring_dur_layout.addWidget(QLabel("Ring Duration:"))
+        self.ring_dur_combo = QComboBox()
+        self.ring_dur_combo.addItems(["1 minute", "2 minutes", "3 minutes", "4 minutes", "5 minutes"])
+        self.ring_dur_combo.setCurrentText("1 minute")
+        ring_dur_layout.addWidget(self.ring_dur_combo)
+        layout.addLayout(ring_dur_layout)
+
+        auto_s_layout = QHBoxLayout()
+        self.auto_snooze_chk = QCheckBox("Auto Snooze")
+        self.auto_snooze_chk.setChecked(False)
+
+        self.auto_snooze_limit_spin = QSpinBox()
+        self.auto_snooze_limit_spin.setRange(1, 20)
+        self.auto_snooze_limit_spin.setValue(3)
+
+        auto_s_layout.addWidget(self.auto_snooze_chk)
+        auto_s_layout.addWidget(QLabel("Max Auto-Snoozes:"))
+        auto_s_layout.addWidget(self.auto_snooze_limit_spin)
+        auto_s_layout.addStretch()
+        layout.addLayout(auto_s_layout)
+
         btn_layout = QHBoxLayout()
         btn_save = QPushButton("Save")
         btn_save.clicked.connect(self.save)
@@ -292,12 +332,24 @@ class AlarmDialog(QDialog):
         self.vol_slider.setValue(int(self.alarm.get('volume', 1.0) * 100))
         self.snooze_spin.setValue(self.alarm.get('snooze_duration', 5))
 
+        dur_min = self.alarm.get('ring_duration_minutes', 1)
+        self.ring_dur_combo.setCurrentText(f"{dur_min} minute" if dur_min == 1 else f"{dur_min} minutes")
+
+        self.auto_snooze_chk.setChecked(self.alarm.get('auto_snooze', False))
+        self.auto_snooze_limit_spin.setValue(self.alarm.get('auto_snooze_limit', 3))
+
     def save(self):
         time_str = f"{self.hr_combo.currentText()}:{self.min_combo.currentText()}"
 
         days = []
         if self.repeat_combo.currentText() == "weekly":
             days = [i for i, chk in enumerate(self.day_checks) if chk.isChecked()]
+
+        text = self.ring_dur_combo.currentText()
+        try:
+            ring_dur_min = int(''.join(filter(str.isdigit, text)))
+        except ValueError:
+            ring_dur_min = 1
 
         new_alarm = {
             "id": self.alarm['id'] if self.alarm else str(uuid.uuid4()),
@@ -309,7 +361,11 @@ class AlarmDialog(QDialog):
             "repeat_date": self.day_spin.value(),
             "sound": self.sound_edit.text(),
             "volume": self.vol_slider.value() / 100.0,
-            "snooze_duration": self.snooze_spin.value()
+            "snooze_duration": self.snooze_spin.value(),
+            "ring_duration_minutes": ring_dur_min,
+            "auto_snooze": self.auto_snooze_chk.isChecked(),
+            "auto_snooze_limit": self.auto_snooze_limit_spin.value(),
+            "auto_snooze_current": self.alarm.get('auto_snooze_current', 0) if self.alarm else 0
         }
         new_alarm['next_trigger'] = calculate_next_trigger(new_alarm)
 
@@ -324,6 +380,71 @@ class AlarmDialog(QDialog):
             pass
         super().closeEvent(event)
 
+class BedsideSettingsDialog(QDialog):
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config = config_manager
+        self.setWindowTitle("Bedside Clock Settings")
+        self.setMinimumWidth(350)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        settings = self.config.config["bedside_settings"]
+
+        self.font_combo = QComboBox()
+        self.font_combo.addItems(["Monospace", "Sans", "Serif", "Arial", "Courier"])
+        self.font_combo.setCurrentText(settings.get("font_family", "Monospace"))
+        layout.addWidget(QLabel("Font Family:"))
+        layout.addWidget(self.font_combo)
+
+        self.color_combo = QComboBox()
+        self.color_combo.addItems(["#00ffff", "#ffffff", "#00ff00", "#ff00ff", "#ff5500", "#ffff00"])
+        self.color_combo.setCurrentText(settings.get("font_color", "#00ffff"))
+        layout.addWidget(QLabel("Font Color:"))
+        layout.addWidget(self.color_combo)
+
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(30, 200)
+        self.size_spin.setValue(settings.get("font_size", 80))
+        layout.addWidget(QLabel("Font Size (Zoom):"))
+        layout.addWidget(self.size_spin)
+
+        self.chk_seconds = QCheckBox("Show Seconds")
+        self.chk_seconds.setChecked(settings.get("show_seconds", True))
+        layout.addWidget(self.chk_seconds)
+
+        self.chk_countdown = QCheckBox("Show Next Alarm Countdown")
+        self.chk_countdown.setChecked(settings.get("show_countdown", True))
+        layout.addWidget(self.chk_countdown)
+
+        btn_layout = QHBoxLayout()
+        btn_save = QPushButton("Save")
+        btn_save.clicked.connect(self.save)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.save()
+        elif event.key() == Qt.Key.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
+
+    def save(self):
+        settings = self.config.config["bedside_settings"]
+        settings["font_family"] = self.font_combo.currentText()
+        settings["font_color"] = self.color_combo.currentText()
+        settings["font_size"] = self.size_spin.value()
+        settings["show_seconds"] = self.chk_seconds.isChecked()
+        settings["show_countdown"] = self.chk_countdown.isChecked()
+        self.config.save()
+        self.accept()
+
 class RingDialog(QDialog):
     def __init__(self, alarm, audio, config, parent=None):
         super().__init__(parent)
@@ -331,7 +452,14 @@ class RingDialog(QDialog):
         self.audio = audio
         self.config = config
         self.snoozed = False
+        self.missed = False
+        self.start_time = alarm['time']
+        self.end_time = ""
         self.snooze_duration = self.alarm.get('snooze_duration', 5)
+        self.ring_duration_minutes = self.alarm.get('ring_duration_minutes', 1)
+        self.auto_snooze = self.alarm.get('auto_snooze', False)
+        self.auto_snooze_limit = self.alarm.get('auto_snooze_limit', 3)
+        self.auto_snooze_current = self.alarm.get('auto_snooze_current', 0)
 
         self.setWindowTitle("ALARM RINGING")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
@@ -342,7 +470,12 @@ class RingDialog(QDialog):
             snd = self.config.config["common_sound_file"]
 
         self.audio.play(snd, self.alarm.get('volume', 1.0), fade_in=True)
-        self.setFocus()
+
+        self.timeout_timer = QTimer(self)
+        self.timeout_timer.setInterval(self.ring_duration_minutes * 60000)
+        self.timeout_timer.setSingleShot(True)
+        self.timeout_timer.timeout.connect(self.auto_timeout)
+        self.timeout_timer.start()
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -370,10 +503,21 @@ class RingDialog(QDialog):
         self.snooze_combo.addItems([str(i) for i in range(1, 121)])
         self.snooze_combo.setCurrentText(str(self.snooze_duration))
         self.snooze_combo.setFont(QFont("Sans", 14))
+
+        # Validation rule: integers only (1-120) with inline validation warning label
+        validator = QIntValidator(1, 120, self)
+        self.snooze_combo.lineEdit().setValidator(validator)
+
+        self.validation_lbl = QLabel("Constraint: Integers only (1-120)")
+        self.validation_lbl.setStyleSheet("color: #d9534f; font-size: 11px;")
+        self.validation_lbl.hide()
+
+        self.snooze_combo.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.snooze_combo.currentTextChanged.connect(self.on_snooze_edit)
 
         self.btn_snooze = QPushButton("Snooze (Space)")
         self.btn_snooze.setFont(QFont("Sans", 16))
+        self.btn_snooze.setStyleSheet("padding: 6px;")
         self.btn_snooze.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_snooze.clicked.connect(self.snooze)
 
@@ -381,28 +525,32 @@ class RingDialog(QDialog):
         snz_layout.addWidget(self.snooze_combo)
         snz_layout.addWidget(self.btn_snooze)
         layout.addLayout(snz_layout)
+        layout.addWidget(self.validation_lbl)
 
-        # Universal Event Filter ensures Space/Enter/Arrows work everywhere in the dialog
-        self.installEventFilter(self)
-        self.snooze_combo.installEventFilter(self)
-        self.snooze_combo.lineEdit().installEventFilter(self)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocus()
 
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress:
-            key = event.key()
-            if key == Qt.Key.Key_Space:
-                self.snooze()
-                return True
-            elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self.stop()
-                return True
-            elif key == Qt.Key.Key_Up:
-                self.snooze_up()
-                return True
-            elif key == Qt.Key.Key_Down:
-                self.snooze_down()
-                return True
-        return super().eventFilter(obj, event)
+    def keyPressEvent(self, event):
+        fw = QApplication.focusWidget()
+        if isinstance(fw, QLineEdit):
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        if key == Qt.Key.Key_Space:
+            self.snooze()
+            event.accept()
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.stop()
+            event.accept()
+        elif key == Qt.Key.Key_Up:
+            self.snooze_up()
+            event.accept()
+        elif key == Qt.Key.Key_Down:
+            self.snooze_down()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
 
     def snooze_up(self):
         try:
@@ -421,16 +569,40 @@ class RingDialog(QDialog):
     def on_snooze_edit(self, text):
         self.audio.pause()
         try:
-            self.snooze_duration = int(text)
-            self.btn_snooze.setText(f"Snooze ({self.snooze_duration}m)")
+            val = int(text)
+            if 1 <= val <= 120:
+                self.snooze_duration = val
+                self.btn_snooze.setText(f"Snooze ({self.snooze_duration}m)")
+                self.validation_lbl.hide()
+            else:
+                self.validation_lbl.setText("Constraint: Value must be between 1 and 120")
+                self.validation_lbl.show()
         except ValueError:
-            pass
+            self.validation_lbl.setText("Constraint: Integers only (1-120)")
+            self.validation_lbl.show()
+
+    def auto_timeout(self):
+        if self.auto_snooze and self.auto_snooze_current < self.auto_snooze_limit:
+            self.alarm['auto_snooze_current'] = self.auto_snooze_current + 1
+            self.snoozed = True
+            self.audio.stop()
+            self.accept()
+        else:
+            self.alarm['auto_snooze_current'] = 0
+            self.missed = True
+            self.end_time = datetime.datetime.now().strftime("%H:%M")
+            self.audio.stop()
+            self.accept()
 
     def stop(self):
+        self.timeout_timer.stop()
+        self.alarm['auto_snooze_current'] = 0
         self.audio.stop()
         self.accept()
 
     def snooze(self):
+        self.timeout_timer.stop()
+        self.alarm['auto_snooze_current'] = 0
         try:
             self.snooze_duration = int(self.snooze_combo.currentText())
         except ValueError:
@@ -440,6 +612,8 @@ class RingDialog(QDialog):
         self.accept()
 
     def closeEvent(self, event):
+        self.timeout_timer.stop()
+        self.alarm['auto_snooze_current'] = 0
         self.audio.stop()
         super().closeEvent(event)
 
@@ -459,6 +633,8 @@ class MainWindow(QMainWindow):
 
         self.resize(550, 600)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.is_bedside_mode = False
+
         self.setup_ui()
         self.setup_tray()
         self.refresh_list()
@@ -472,18 +648,36 @@ class MainWindow(QMainWindow):
     def setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        self.main_layout = QVBoxLayout(central)
 
         self.lbl_countdown = QLabel("No active alarms")
         self.lbl_countdown.setFont(QFont("Sans", 14, QFont.Weight.Bold))
         self.lbl_countdown.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.lbl_countdown)
+        self.main_layout.addWidget(self.lbl_countdown)
+
+        self.bedside_clock_widget = QWidget()
+        bedside_layout = QVBoxLayout(self.bedside_clock_widget)
+        bedside_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.lbl_bedside_time = QLabel("00:00:00")
+        self.lbl_bedside_time.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.lbl_bedside_next = QLabel("Next Alarm: None")
+        self.lbl_bedside_next.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        bedside_layout.addWidget(self.lbl_bedside_time)
+        bedside_layout.addWidget(self.lbl_bedside_next)
+        self.bedside_clock_widget.hide()
+        self.main_layout.addWidget(self.bedside_clock_widget)
 
         self.list_widget = QListWidget()
         self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        layout.addWidget(self.list_widget)
+        self.list_widget.itemActivated.connect(self.edit_alarm)
+        self.main_layout.addWidget(self.list_widget)
 
-        btn_layout = QHBoxLayout()
+        self.btn_container = QWidget()
+        btn_layout = QHBoxLayout(self.btn_container)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_add = QPushButton("Add Alarm (N)")
         btn_add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_add.clicked.connect(self.add_alarm)
@@ -492,14 +686,14 @@ class MainWindow(QMainWindow):
         btn_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_edit.clicked.connect(self.edit_alarm)
 
-        btn_del = QPushButton("Delete Selected")
+        btn_del = QPushButton("Delete Selected (D)")
         btn_del.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_del.clicked.connect(self.delete_alarm)
 
         btn_layout.addWidget(btn_add)
         btn_layout.addWidget(btn_edit)
         btn_layout.addWidget(btn_del)
-        layout.addLayout(btn_layout)
+        self.main_layout.addWidget(self.btn_container)
 
         global_group = QGroupBox("Global Settings")
         g_layout = QVBoxLayout(global_group)
@@ -532,12 +726,27 @@ class MainWindow(QMainWindow):
         btn_save_globals.clicked.connect(self.save_globals)
         g_layout.addWidget(btn_save_globals)
 
-        layout.addWidget(global_group)
+        self.global_group_widget = global_group
+        self.main_layout.addWidget(self.global_group_widget)
 
-        btn_tray = QPushButton("Run in Background / Minimize (M)")
+        ctrl_layout = QHBoxLayout()
+        btn_bedside = QPushButton("Bedside Clock (F)")
+        btn_bedside.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_bedside.setStyleSheet("background-color: #224; color: white; font-weight: bold;")
+        btn_bedside.clicked.connect(self.toggle_bedside_mode)
+
+        btn_bedside_settings = QPushButton("Clock Settings (S)")
+        btn_bedside_settings.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_bedside_settings.clicked.connect(self.open_bedside_settings)
+
+        btn_tray = QPushButton("Background (M)")
         btn_tray.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_tray.clicked.connect(self.hide)
-        layout.addWidget(btn_tray)
+
+        ctrl_layout.addWidget(btn_bedside)
+        ctrl_layout.addWidget(btn_bedside_settings)
+        ctrl_layout.addWidget(btn_tray)
+        self.main_layout.addLayout(ctrl_layout)
 
     def setup_tray(self):
         QApplication.instance().setQuitOnLastWindowClosed(False)
@@ -565,14 +774,66 @@ class MainWindow(QMainWindow):
             return
 
         key = event.key()
-        if key == Qt.Key.Key_N:
+        count = self.list_widget.count()
+        row = self.list_widget.currentRow()
+
+        if key == Qt.Key.Key_Up:
+            if count > 0:
+                new_row = max(0, row - 1) if row >= 0 else 0
+                self.list_widget.setCurrentRow(new_row)
+            event.accept()
+        elif key == Qt.Key.Key_Down:
+            if count > 0:
+                new_row = min(count - 1, row + 1) if row >= 0 else 0
+                self.list_widget.setCurrentRow(new_row)
+            event.accept()
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if count > 0 and row >= 0:
+                self.edit_alarm()
+            event.accept()
+        elif key in (Qt.Key.Key_D, Qt.Key.Key_Delete):
+            if count > 0 and row >= 0:
+                self.delete_alarm()
+            event.accept()
+        elif key == Qt.Key.Key_N:
             QTimer.singleShot(0, self.add_alarm)
         elif key == Qt.Key.Key_M:
             self.hide()
         elif key == Qt.Key.Key_Q:
             QApplication.instance().quit()
+        elif key == Qt.Key.Key_F:
+            self.toggle_bedside_mode()
+        elif key == Qt.Key.Key_S:
+            self.open_bedside_settings()
+        elif key == Qt.Key.Key_Escape and self.is_bedside_mode:
+            self.toggle_bedside_mode()
         else:
             super().keyPressEvent(event)
+
+    def toggle_bedside_mode(self):
+        self.is_bedside_mode = not self.is_bedside_mode
+        if self.is_bedside_mode:
+            self.setStyleSheet("background-color: #000;")
+            self.lbl_countdown.hide()
+            self.list_widget.hide()
+            self.btn_container.hide()
+            self.global_group_widget.hide()
+            self.bedside_clock_widget.show()
+            self.showFullScreen()
+        else:
+            self.setStyleSheet("")
+            self.lbl_countdown.show()
+            self.list_widget.show()
+            self.btn_container.show()
+            self.global_group_widget.show()
+            self.bedside_clock_widget.hide()
+            self.showNormal()
+            self.setFocus()
+
+    def open_bedside_settings(self):
+        dlg = BedsideSettingsDialog(self.config_manager, self)
+        if dlg.exec():
+            self.update_countdown()
 
     def tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -620,6 +881,9 @@ class MainWindow(QMainWindow):
             self.list_widget.addItem(item)
             self.list_widget.setItemWidget(item, widget)
 
+        if self.list_widget.count() > 0 and self.list_widget.currentRow() < 0:
+            self.list_widget.setCurrentRow(0)
+
         self.update_countdown()
 
     def toggle_active(self, index, state):
@@ -641,6 +905,7 @@ class MainWindow(QMainWindow):
             self.config_manager.config["alarms"].append(dlg.alarm)
             self.config_manager.save()
             self.refresh_list()
+        self.setFocus()
 
     def edit_alarm(self):
         idx = self.get_selected_original_index()
@@ -651,13 +916,24 @@ class MainWindow(QMainWindow):
             self.config_manager.config["alarms"][idx] = dlg.alarm
             self.config_manager.save()
             self.refresh_list()
+        self.setFocus()
 
     def delete_alarm(self):
         idx = self.get_selected_original_index()
         if idx < 0: return
-        del self.config_manager.config["alarms"][idx]
-        self.config_manager.save()
-        self.refresh_list()
+        alarm = self.config_manager.config["alarms"][idx]
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to delete alarm '{alarm['label']}' at {alarm['time']}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            del self.config_manager.config["alarms"][idx]
+            self.config_manager.save()
+            self.refresh_list()
+        self.setFocus()
 
     def browse_dir(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Base Sound Directory", self.edit_sound_dir.text())
@@ -678,15 +954,34 @@ class MainWindow(QMainWindow):
         self.setFocus()
 
     def update_countdown(self):
+        now_dt = datetime.datetime.now()
+        settings = self.config_manager.config["bedside_settings"]
+
+        f_family = settings.get("font_family", "Monospace")
+        f_color = settings.get("font_color", "#00ffff")
+        f_size = settings.get("font_size", 80)
+
+        self.lbl_bedside_time.setFont(QFont(f_family, f_size, QFont.Weight.Bold))
+        self.lbl_bedside_next.setFont(QFont(f_family, int(f_size / 3.5)))
+
+        time_fmt = "%H:%M:%S" if settings.get("show_seconds", True) else "%H:%M"
+        self.lbl_bedside_time.setText(now_dt.strftime(time_fmt))
+        self.lbl_bedside_time.setStyleSheet(f"color: {f_color};")
+        self.lbl_bedside_next.setStyleSheet(f"color: {f_color};")
+
         active_alarms = [a for a in self.config_manager.config["alarms"] if a['active']]
         if not active_alarms:
             self.lbl_countdown.setText("No active alarms")
+            if settings.get("show_countdown", True):
+                self.lbl_bedside_next.setText("Next Alarm: None Set")
+                self.lbl_bedside_next.show()
+            else:
+                self.lbl_bedside_next.hide()
             self.tray_icon.setToolTip("Alarm Clock - No active alarms")
         else:
-            now = datetime.datetime.now()
             next_alarm = min(active_alarms, key=lambda a: a['next_trigger'])
             trigger_dt = datetime.datetime.fromisoformat(next_alarm['next_trigger'])
-            diff = trigger_dt - now
+            diff = trigger_dt - now_dt
 
             if diff.total_seconds() > 0:
                 hours, rem = divmod(diff.seconds, 3600)
@@ -695,10 +990,21 @@ class MainWindow(QMainWindow):
 
                 time_str = f"{days}d " if days > 0 else ""
                 time_str += f"{hours:02d}h {minutes:02d}m {seconds:02d}s"
+
                 self.lbl_countdown.setText(f"Next alarm in: {time_str}")
+                if settings.get("show_countdown", True):
+                    self.lbl_bedside_next.setText(f"Next: {next_alarm['label']} ({next_alarm['time']}) in {time_str}")
+                    self.lbl_bedside_next.show()
+                else:
+                    self.lbl_bedside_next.hide()
                 self.tray_icon.setToolTip(f"Next alarm in: {time_str}")
             else:
                 self.lbl_countdown.setText("Alarm ringing soon...")
+                if settings.get("show_countdown", True):
+                    self.lbl_bedside_next.setText("Alarm ringing soon...")
+                    self.lbl_bedside_next.show()
+                else:
+                    self.lbl_bedside_next.hide()
                 self.tray_icon.setToolTip("Alarm ringing soon...")
 
     def check_alarms(self):
@@ -707,15 +1013,20 @@ class MainWindow(QMainWindow):
 
         for alarm in self.config_manager.config["alarms"]:
             if alarm['active'] and alarm.get('next_trigger', '') <= now:
-                if self.isHidden():
-                    NotificationManager.send("ALARM", alarm['label'])
-
                 ring_dlg = RingDialog(alarm, self.audio, self.config_manager, self)
                 ring_dlg.exec()
 
                 if ring_dlg.snoozed:
                     snooze_dt = datetime.datetime.now() + datetime.timedelta(minutes=ring_dlg.snooze_duration)
                     alarm['next_trigger'] = snooze_dt.isoformat()
+                    alarm['time'] = snooze_dt.strftime("%H:%M")
+                elif ring_dlg.missed:
+                    NotificationManager.send_missed(ring_dlg.start_time, ring_dlg.end_time)
+                    if alarm['repeat_type'] == 'none':
+                        alarm['active'] = False
+                    else:
+                        alarm['next_trigger'] = calculate_next_trigger(alarm)
+                        alarm['time'] = datetime.datetime.fromisoformat(alarm['next_trigger']).strftime("%H:%M")
                 else:
                     if alarm['repeat_type'] == 'none':
                         alarm['active'] = False
