@@ -7,3 +7,9 @@ AppDir/
 *.AppImage
 *.spec
 appimagetool*.AppImage
+build/
+dist/
+AppDir/
+*.AppImage
+*.spec
+appimagetool*.AppImage
